@@ -1,0 +1,915 @@
+---
+title: "BarSeq Data Exploration and Statistics"
+output: html_notebook
+---
+
+BarSeq of JLW8 pool co-cultured with 21/22 in planktonic culture. 
+Want to explore data to make sure the gene count values we are seeing are resulting from biological, rather than technical, factors. 
+```{r}
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(pheatmap)
+library(ggplot2)
+library(hrbrthemes)
+library(gcookbook)
+```
+
+
+```{r}
+# load in gene count table with genes in rows and samples in columns
+gene_count_table <- read.csv("nov24_gene_count.csv", header = T, sep = ",") 
+
+# load in metadata
+metadata <- read.csv("JLW8_pool_metadata.csv", header = T, sep = ",") 
+
+# subset the gene count table to only include the values 
+gene_count <- gene_count_table[,9:81]
+```
+Our gene count table rows are doubled for each gene (have about 4800 total rows, when in reality JLW8 has about 2400 total genes). This is an artifact from downloading gene annotation data. For now, let's remove this duplication and keep only the rows that contain the string "ID=gene". 
+```{r}
+# Filter rows where "ID=cds" is present in 'gene_id'
+gene_count_cds <- gene_count[grepl("ID=cds", gene_count$gene_id), ]
+
+# Rename rownames to gene_ids
+gene_count_cds$gene_id <- gsub(".*Parent=gene-(MMOL_RS[0-9]+).*", "\\1", gene_count_cds$gene_id)
+
+# Set the extracted MMOL_RSXXXXX as rownames
+gene_count_filt <- gene_count_cds
+rownames(gene_count_filt) <- gene_count_filt$gene_id
+
+# Remove the `gene_id` column 
+gene_count_filt$gene_id <- NULL
+```
+
+Separate the information in the cluttered "gene_id" row so that we can refer the gene ID to it's other functional information. 
+```{r}
+# filter rows containing "ID="
+data_with_id <- gene_count[-1,] %>%
+  filter(grepl("^ID=", gene_id)) %>%
+  select(gene_id)  # Keep only relevant columns (drop A01P01, etc.)
+
+# extract MMOL_RS as identifier
+data_with_id <- data_with_id %>%
+  mutate(
+    MMOL_RS = gsub(".*(MMOL_RS[0-9]+).*", "\\1", gene_id)  # Extract MMOL_RS identifier
+  )
+
+# split rows into key-value pairs
+split_data <- data_with_id %>%
+  separate_rows(gene_id, sep = ";") %>%  # Split each `;` into separate rows
+  separate(gene_id, into = c("key", "value"), sep = "=", fill = "right") %>%  # Split into "key" and "value"
+  filter(!is.na(value))  # Remove rows without values
+
+# pivot wider to create columns for each key
+formatted_data <- split_data %>%
+  pivot_wider(
+    names_from = key,  # Use `key` as the new column names
+    values_from = value,  # Populate columns with corresponding `value`
+    values_fn = list(value = ~ paste(unique(.), collapse = ";"))  # Concatenate unique values for duplicates
+  )
+
+# clean final data
+
+gene_information <- formatted_data %>%
+  relocate(MMOL_RS) %>%  # Move MMOL_RS to the first column
+  filter(!is.na(MMOL_RS))  # Remove rows without MMOL_RS
+```
+
+
+Now we want to look at some statistics about the average number of reads found across technical replicates and between conditions. 
+
+```{r}
+# change to long format
+gene_count_long <- gene_count_filt %>%
+  rownames_to_column("gene_id") %>%
+  pivot_longer(cols = -gene_id, names_to = "Position", values_to = "Count")
+
+# merge with metadata
+merged_data <- gene_count_long %>%
+  left_join(metadata, by = c("Position" = "Position"))
+
+```
+Compute statistics
+```{r}
+summary_stats <- merged_data %>%
+  group_by(Condition) %>%
+  summarize(
+    avg_count = mean(Count, na.rm = TRUE),
+    sd_count = sd(Count, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+Plot
+```{r}
+merged_data <- merged_data %>% filter(!is.na(Condition), Condition != "blank")
+```
+
+```{r}
+ggplot(summary_stats, aes(x = Condition, y = avg_count, fill = Condition)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(
+    aes(ymin = avg_count - sd_count, ymax = avg_count + sd_count),
+    width = 0.2,
+    position = position_dodge(0.9)
+  ) +
+  theme_minimal()
+```
+This is not very helpful since nearly 90% of all genes have a count of 0.
+```{r}
+ggplot(merged_data, aes(x = Condition, y = Count)) +
+  # Bar plot showing mean counts
+  stat_summary(fun = mean, geom = "bar", fill = "steelblue", color = "black", width = 0.7) +
+  
+  # Error bars for standard deviation
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", 
+               width = 0.2, color = "black") +
+  
+  # Add individual points
+  geom_jitter(aes(color = gene_id), width = 0.2, size = 2, alpha = 0.7) +
+  
+  # Customize the plot
+  labs(
+    title = "Average Counts with Individual Gene Points",
+    x = "Condition",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove the legend
+  )
+```
+I am curious about which genes have higher counts in each condition. I will make an interactive version of this plot. 
+```{r}
+library(plotly)
+
+# Create the ggplot object
+p <- ggplot(merged_data, aes(x = Condition, y = Count)) +
+  # Bar plot showing mean counts
+  stat_summary(fun = mean, geom = "bar", fill = "steelblue", color = "black", width = 0.7) +
+  
+  # Error bars for standard deviation
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", 
+               width = 0.2, color = "black") +
+  
+  # Add individual points with tooltip for gene_id
+  geom_jitter(aes(color = gene_id, text = paste("Gene ID:", gene_id)), 
+              width = 0.2, size = 2, alpha = 0.7, show.legend = FALSE) +
+  
+  # Customize the plot
+  labs(
+    title = "Average Counts with Individual Gene Points",
+    x = "Condition",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove the legend
+  )
+
+# Convert ggplot to an interactive plotly plot
+interactive_plot <- ggplotly(p, tooltip = c("text"))
+
+```
+
+```{r}
+library(htmlwidgets)
+saveWidget(interactive_plot, "interactive_plot.html")
+```
+
+The fact that we have so many genes with 0 counts across all conditions is slowing down the generation of our plots. Let's get rid of any gene where for every single position/sample, the gene count was 0. 
+```{r}
+# Filter rows where the count is not 0 for all conditions
+count_data <- merged_data %>%
+  filter(rowSums(select(., starts_with("count"))) > 0)
+
+```
+Now plot this again
+```{r}
+ggplot(count_data, aes(x = Condition, y = Count)) +
+  # Bar plot showing mean counts
+  stat_summary(fun = mean, geom = "bar", fill = "steelblue", color = "black", width = 0.7) +
+  
+  # Error bars for standard deviation
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", 
+               width = 0.2, color = "black") +
+  
+  # Add individual points
+  geom_jitter(aes(color = gene_id), width = 0.2, size = 2, alpha = 0.7) +
+  
+  # Customize the plot
+  labs(
+    title = "Average Counts with Individual Gene Points",
+    x = "Condition",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove the legend
+  )
+```
+
+```{r}
+# Create the ggplot object
+p2 <- ggplot(count_data, aes(x = Condition, y = Count)) +
+  # Bar plot showing mean counts
+  stat_summary(fun = mean, geom = "bar", fill = "steelblue", color = "black", width = 0.7) +
+  
+  # Error bars for standard deviation
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult = 1), geom = "errorbar", 
+               width = 0.2, color = "black") +
+  
+  # Add individual points with tooltip for gene_id
+  geom_jitter(aes(color = gene_id, text = paste("Gene ID:", gene_id)), 
+              width = 0.2, size = 2, alpha = 0.7, show.legend = FALSE) +
+  
+  # Customize the plot
+  labs(
+    title = "Average Counts with Individual Gene Points",
+    x = "Condition",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"  # Remove the legend
+  )
+
+# Convert ggplot to an interactive plotly plot
+interactive_plot2 <- ggplotly(p2, tooltip = c("text"))
+
+saveWidget(interactive_plot2, "interactive_plot2.html")
+```
+Now to get a sense overall of how many counts in each gene, let's make a heatmap. 
+```{r}
+# Remove rows where all column values are zero
+gene_count_zero <- gene_count_filt[rowSums(gene_count_filt != 0) > 0, ]
+
+# Extract Position-Condition mapping from metadata
+position_condition <- metadata %>%
+  select(Position, Condition, Replicate) %>%
+  distinct()  # Ensure unique combinations
+
+# Ensure `Position` order in gene_count_zero matches metadata
+gene_count_zero <- gene_count_zero[, position_condition$Position]
+
+# Create annotation for Conditions
+condition_annotation <- data.frame(
+  Condition = position_condition$Condition
+)
+rownames(condition_annotation) <- position_condition$Position
+```
+
+```{r}
+# Log-transform counts to reduce skewness
+heatmap_data <- log1p(gene_count_zero)  # Adds 1 before applying log to handle zeros
+
+# plot heatmap
+pheatmap(
+  heatmap_data[1:50,],
+  annotation_col = condition_annotation,  # Annotate columns with Conditions
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  breaks = breaks, 
+  colors = colors,
+  main = "Gene Count Heatmap Grouped by Condition",
+  fontsize_row = 8,
+  fontsize_col = 8
+)
+```
+Change column names on heatmap to replicate, rather than position, to see if replicates are similar.
+```{r}
+# Ensure unique mapping of Position to Replicate
+position_to_replicate <- metadata %>%
+  select(Position, Replicate) %>%
+  distinct()
+
+# Rename columns in heatmap_data using Replicate values
+colnames(heatmap_data) <- position_to_replicate$Replicate
+
+# make annotation
+replicate_condition <- metadata %>%
+  select(Condition, Replicate) %>%
+  distinct()  # Ensure unique combinations
+
+replicate_annotation <- data.frame(
+  Condition = replicate_condition$Condition
+)
+rownames(replicate_annotation) <- replicate_condition$Replicate
+
+# Define custom breaks (adjust the range based on your data)
+breaks <- seq(min(heatmap_data, na.rm = TRUE), max(heatmap_data, na.rm = TRUE), length.out = 50)
+
+# Generate the color vector using colorRampPalette
+colors <- colorRampPalette(c("blue", "white", "red"))(length(breaks) - 1)
+
+
+# plot heatmap
+pheatmap(
+  heatmap_data[1:50,],  # Subset data for visualization
+  annotation_col = replicate_annotation,  # Annotate columns with Conditions
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  main = "Gene Count Heatmap Grouped by Condition",
+  fontsize_row = 8,
+  fontsize_col = 8
+)
+```
+
+```{r}
+# Generate your plot
+pheatmap(
+  heatmap_data[1:50,],  # Subset data for visualization
+  annotation_col = replicate_annotation,  # Annotate columns with Conditions
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  main = "log transformed Gene Count Heatmap Grouped by Condition (1-50)",
+  fontsize_row = 8,
+  fontsize_col = 8
+)
+```
+
+Use gene product instead of MMOL gene_id
+```{r}
+# Create a combined label for MMOL_RS and product
+combined_labels <- paste0(gene_information$MMOL_RS, ": ", gene_information$product)
+
+# Create a named vector for mapping MMOL_RS to combined labels
+mmol_to_combined <- setNames(combined_labels, gene_information$MMOL_RS)
+
+# Replace row names in heatmap_data with the combined label
+rownames(heatmap_data) <- paste0(rownames(heatmap_data), ": ", mmol_to_combined[rownames(heatmap_data)])
+
+pheatmap(
+  heatmap_data[500:550,],  # Subset data for visualization
+  annotation_col = replicate_annotation,  # Annotate columns with Conditions
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  breaks = breaks,
+  colors = colors,
+  main = "log-transformed Gene Count Heatmap Grouped by Condition",
+  fontsize_row = 8,
+  fontsize_col = 8
+)
+
+```
+
+
+
+
+
+# GO terms
+
+Now I want to make heatmaps that divide up the genes based on cellular pathways as defined by GO terms. 
+First, save-as a .txt file the following database of GO terms: https://current.geneontology.org/ontology/go-basic.obo
+Then load this into R. 
+```{r}
+# Load the .txt file
+file_path <- "go-basic.txt"  # Replace with your file path
+go_basic <- readLines(file_path)
+```
+Parse this file and make our own GO database. 
+```{r}
+# Initialize variables
+ids <- c()
+names <- c()
+
+# Loop through the lines to extract `id:` and `name:` for each `[Term]`
+current_id <- NA
+current_name <- NA
+
+for (line in go_basic) {
+  # Identify a new `[Term]` section
+  if (line == "[Term]") {
+    # Save the previous term's ID and name (if they exist)
+    if (!is.na(current_id) && !is.na(current_name)) {
+      ids <- c(ids, current_id)
+      names <- c(names, current_name)
+    }
+    # Reset current_id and current_name for the new term
+    current_id <- NA
+    current_name <- NA
+  }
+  
+  # Extract `id:` line
+  if (grepl("^id: ", line)) {
+    current_id <- sub("^id: ", "", line)
+  }
+  
+  # Extract `name:` line
+  if (grepl("^name: ", line)) {
+    current_name <- sub("^name: ", "", line)
+  }
+}
+
+# Save the last term's ID and name (if they exist)
+if (!is.na(current_id) && !is.na(current_name)) {
+  ids <- c(ids, current_id)
+  names <- c(names, current_name)
+}
+
+# Create a dataframe
+go_terms_df <- data.frame(
+  ID = ids,
+  Name = names,
+  stringsAsFactors = FALSE
+)
+
+# Print the dataframe
+print(head(go_terms_df))
+
+```
+
+
+
+
+
+# DESeq2 analysis
+We need a gene count table with genes in rows and samples in columns.  We also need a metadata table with samples in rows and conditions/info in columns. 
+```{r}
+library(DESeq2)
+```
+
+```{r}
+# format our count table
+gene_count_for_DESeq <- gene_count_cds
+rownames(gene_count_for_DESeq) <- gene_count_for_DESeq$gene_id
+
+# Remove the `gene_id` column 
+gene_count_for_DESeq$gene_id <- NULL
+
+# Remove last two columns since these wells were empty during our sequencing
+gene_table <- gene_count_for_DESeq[,1:70]
+
+# format our metadata table
+rownames(metadata) <- metadata$Position
+
+# Remove the `gene_id` column 
+metadata$Position <- NULL
+```
+
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = gene_table, 
+                              colData = metadata, 
+                              design = ~ Condition)
+
+dds_deseq <- DESeq(dds)
+
+results <- results(dds_deseq, alpha=0.05)
+```
+
+How many genes have an adjusted p-value of less than 0.05?
+```{r}
+sum(results$padj < 0.05, na.rm = TRUE)
+```
+## Hierarchial clustering
+```{r}
+# Transform counts for clustering
+vsd <- varianceStabilizingTransformation(dds_deseq)   # Variance stabilizing transformation (alternative to rlog)
+
+# Extract transformed data
+normalized_counts <- assay(vsd)  
+
+res <- results(dds_deseq, alpha = 0.05)
+sig_genes <- rownames(res[which(res$padj < 0.05), ])
+cluster_data <- normalized_counts[sig_genes, ]
+
+top_var_genes <- head(order(rowVars(normalized_counts), decreasing = TRUE), 500)
+cluster_data1 <- normalized_counts[top_var_genes, ]
+
+# Distance matrix for genes
+dist_genes <- dist(t(normalized_counts))  # Transpose for clustering samples
+
+# Distance matrix for samples
+dist_samples <- dist(cluster_data)
+
+# Hierarchical clustering
+hclust_genes <- hclust(dist_genes, method = "ward.D2")
+hclust_samples <- hclust(dist_samples, method = "ward.D2") 
+
+plot(hclust_genes)
+
+```
+assign colors based on metadata
+```{r}
+library(dendextend)
+
+
+euc_dend <- as.dendrogram(hclust_genes, hang=0.1)
+
+dend_cols <- as.character(metadata$Condition_color[order.dendrogram(euc_dend)])
+labels_colors(euc_dend) <- dend_cols
+plot(euc_dend, ylab="VST Euc. dist.")
+
+
+```
+## PCA ordination
+```{r}
+theme_te <- function() theme_set(theme_bw() %+replace%
+  theme(axis.line = element_line(colour = "black"),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  legend.background = element_blank(),
+  legend.key = element_blank(),
+  strip.background = element_blank(),
+  plot.background = element_blank() ))
+
+# Perform PCA
+pca <- prcomp(t(normalized_counts))  # Transpose so samples are rows
+pca_df <- as.data.frame(pca$x)       # Extract principal components
+pca_df$Condition <- colData(dds)$Condition  # Add metadata for coloring
+
+# Plot PCA
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition)) +
+  geom_point(size = 3) +
+  labs(title = "PCA Ordination Plot", x = "PC1", y = "PC2") +
+  theme_te()
+```
+
+```{r}
+library(scatterplot3d)
+
+# Assign unique colors to each condition
+unique_conditions <- unique(pca_df$Condition)
+condition_colors <- setNames(rainbow(length(unique_conditions)), unique_conditions)
+
+# Map colors to the Condition column
+pca_df$Color <- condition_colors[pca_df$Condition]
+
+# Create a 3D PCA plot
+s3d <- scatterplot3d(
+  x = pca_df[, 1],  # PC1
+  y = pca_df[, 2],  # PC2
+  z = pca_df[, 3],  # PC3
+  pch = 19,
+  color = pca_df$Color,  # Use predefined colors
+  main = "3D PCA Plot",
+  xlab = "PC1",
+  ylab = "PC2",
+  zlab = "PC3"
+)
+
+# Add a legend on the side
+legend(
+  "topright",                     # Position of the legend
+  legend = unique(pca_df$Condition),  # Unique conditions as legend labels
+  col = unique(pca_df$Color),     # Unique colors for the conditions
+  pch = 19,                       # Point style matches the plot
+  title = "Conditions"            # Optional legend title
+)
+```
+
+```{r}
+library(plotly)
+library(htmlwidgets)
+
+pca_plot <- plot_ly() %>%
+    add_trace(
+    x = ~pca_df$PC1,
+    y = ~pca_df$PC2,
+    z = ~pca_df$PC3,
+    type = "scatter3d",
+    mode = "markers",
+    marker = list(size = 5, color = ~pca_df$Color),
+    text = ~pca_df$Condition
+  ) %>%
+    layout(
+    title = "3D PCA Plot with Condition Legend",
+    scene = list(
+      xaxis = list(title = "PC1"),
+      yaxis = list(title = "PC2"),
+      zaxis = list(title = "PC3")
+    ),
+    legend = list(
+      title = list(text = "Conditions"),  
+      x = 1.05,                           
+      y = 0.9
+    )
+  )
+
+# Save the plot as an HTML file
+saveWidget(pca_plot, file = "3D_PCA_Plot.html")
+```
+
+
+# Pairwise comparisons
+```{r}
+# Specify a pairwise contrast
+res_AB <- results(dds_deseq, contrast = c("Condition", "C_MA_La_P3", "J_MA_La_P3"))
+
+# View summary of significant genes
+summary(res_AB)
+
+# View top differentially expressed genes
+res_AB <- res_AB[order(res_AB$padj), ]  # Sort by adjusted p-value
+head(res_AB)
+
+```
+visualize with volcano plot
+```{r}
+library(plotly)
+
+res_df <- as.data.frame(res_AB) %>%
+  rownames_to_column(var = "Gene") %>%
+  mutate(
+    negLog10Padj = -log10(padj),
+    Significant = ifelse(padj < 0.05 & abs(log2FoldChange) > 1, "Yes", "No")
+  )
+
+
+#include gene product into volcano plot: in this case, the dots on the left mean that gene counts were high in JLW8 pool control but then were significantly lower in the JLW8 + 21/22 analogous condition. 
+
+#Basically, if we can detect a gene mutant in JLW8 axenic, that tells us that the gene wasn't essential to survival. However, if that gene mutant is much less detected in co-culture conditions, then that suggests that something about the coculture confers the gene in question to be essential or necessary. 
+
+# Merge res_df with gene_information based on gene ID
+merged_df <- merge(res_df, gene_information, 
+                   by.x = "Gene", 
+                   by.y = "MMOL_RS", 
+                   all.x = TRUE)
+
+# Check merged dataframe
+head(merged_df)
+
+
+# Create the interactive volcano plot
+volcano_plot <- plot_ly(
+  data = merged_df,
+  x = ~log2FoldChange,
+  y = ~negLog10Padj,
+  text = ~paste(
+    "Gene:", Gene,
+    "<br>Product:", product,
+    "<br>log2FC:", log2FoldChange,
+    "<br>p-adj:", padj
+  ),
+  color = ~Significant,
+  colors = c("grey", "red"),
+  type = "scatter",
+  mode = "markers",
+  marker = list(size = 8, opacity = 0.6)
+) %>%
+  layout(
+    title = list(text = "Interactive Volcano Plot"),
+    xaxis = list(title = list(text = "Log2 Fold Change")),
+    yaxis = list(title = list(text = "-Log10 Adjusted P-value")),
+    legend = list(title = list(text = "Significance"))
+  )
+
+# Display the plot
+volcano_plot
+
+# save plot
+library(htmlwidgets)
+
+# Save the interactive volcano plot as an HTML file
+htmlwidgets::saveWidget(volcano_plot, "C-J_MA_La_P3_interactive_volcano_plot.html")
+```
+
+
+repeat with a different pair
+```{r}
+# Specify a pairwise contrast
+res_CD <- results(dds_deseq, contrast = c("Condition", "C_MeOH_La_P5", "J_MeOH_La_P5"))
+
+# View summary of significant genes
+summary(res_CD)
+
+# View top differentially expressed genes
+res_CD <- res_CD[order(res_CD$padj), ]  # Sort by adjusted p-value
+head(res_CD)
+```
+```{r}
+res_df_cd <- as.data.frame(res_CD) %>%
+  rownames_to_column(var = "Gene") %>%
+  mutate(
+    negLog10Padj = -log10(padj),
+    Significant = ifelse(padj < 0.05 & abs(log2FoldChange) > 1, "Yes", "No")
+  )
+
+# Merge res_df with gene_information based on gene ID
+merged_df_CD <- merge(res_df_cd, gene_information, 
+                   by.x = "Gene", 
+                   by.y = "MMOL_RS", 
+                   all.x = TRUE)
+
+# Check merged dataframe
+head(merged_df_CD)
+
+
+# Create the interactive volcano plot
+volcano_plot_P5 <- plot_ly(
+  data = merged_df_CD,
+  x = ~log2FoldChange,
+  y = ~negLog10Padj,
+  text = ~paste(
+    "Gene:", Gene,
+    "<br>Product:", product,
+    "<br>log2FC:", log2FoldChange,
+    "<br>p-adj:", padj
+  ),
+  color = ~Significant,
+  colors = c("grey", "red"),
+  type = "scatter",
+  mode = "markers",
+  marker = list(size = 8, opacity = 0.6)
+) %>%
+  layout(
+    title = list(text = "MeOH P5 Volcano Plot"),
+    xaxis = list(title = list(text = "Log2 Fold Change")),
+    yaxis = list(title = list(text = "-Log10 Adjusted P-value")),
+    legend = list(title = list(text = "Significance"))
+  )
+
+# Display the plot
+volcano_plot
+```
+
+save interactive volcano plots
+```{r}
+library(htmlwidgets)
+
+# Save the interactive volcano plot as an HTML file
+htmlwidgets::saveWidget(volcano_plot_P3, "C-J_MeOH_La_P3_interactive_volcano_plot.html")
+htmlwidgets::saveWidget(volcano_plot_P5, "C-J_MeOH_La_P5_interactive_volcano_plot.html")
+```
+
+now with -La conditions
+```{r}
+# Specify a pairwise contrast
+res_EF <- results(dds_deseq, contrast = c("Condition", "C_MA_noLa_P3", "C_MA_La_P3"))
+
+# View summary of significant genes
+summary(res_EF)
+
+# View top differentially expressed genes
+res_EF <- res_EF[order(res_EF$padj), ]  # Sort by adjusted p-value
+head(res_EF)
+```
+
+```{r}
+res_df_EF <- as.data.frame(res_EF) %>%
+  rownames_to_column(var = "Gene") %>%
+  mutate(
+    negLog10Padj = -log10(padj),
+    Significant = ifelse(padj < 0.05 & abs(log2FoldChange) > 1, "Yes", "No")
+  )
+
+# Merge res_df with gene_information based on gene ID
+merged_df_EF <- merge(res_df_EF, gene_information, 
+                   by.x = "Gene", 
+                   by.y = "MMOL_RS", 
+                   all.x = TRUE)
+
+# Check merged dataframe
+head(merged_df_EF)
+
+
+# Create the interactive volcano plot
+volcano_plot_EF_P3 <- plot_ly(
+  data = merged_df_EF,
+  x = ~log2FoldChange,
+  y = ~negLog10Padj,
+  text = ~paste(
+    "Gene:", Gene,
+    "<br>Product:", product,
+    "<br>log2FC:", log2FoldChange,
+    "<br>p-adj:", padj
+  ),
+  color = ~Significant,
+  colors = c("grey", "red"),
+  type = "scatter",
+  mode = "markers",
+  marker = list(size = 8, opacity = 0.6)
+) %>%
+  layout(
+    title = list(text = "C-MA P3 +/- La Volcano Plot"),
+    xaxis = list(title = list(text = "Log2 Fold Change")),
+    yaxis = list(title = list(text = "-Log10 Adjusted P-value")),
+    legend = list(title = list(text = "Significance"))
+  )
+
+# Display the plot
+volcano_plot_EF_P3
+```
+
+All by all comparison
+```{r}
+# Get all condition levels
+conditions <- levels(dds_deseq$Condition)
+
+# Perform pairwise comparisons
+pairwise_results <- list()
+
+for (i in 1:(length(conditions) - 1)) {
+  for (j in (i + 1):length(conditions)) {
+    contrast <- c("Condition", conditions[i], conditions[j])
+    res <- results(dds_deseq, contrast = contrast)
+    pairwise_results[[paste(conditions[i], "vs", conditions[j], sep = "_")]] <- res
+  }
+}
+
+# Access a specific result
+pairwise_results[["H2O_vs_J_MeOH_La_P3"]]
+
+```
+
+
+Reformat all_results into a summary table that can be analyzed easily in excel
+```{r}
+# Get all condition levels
+conditions <- levels(dds_deseq$Condition)
+
+# Create an empty dataframe to store results
+wide_results <- data.frame()
+
+# Perform pairwise comparisons and add columns for each comparison
+for (i in 1:(length(conditions) - 1)) {
+  for (j in (i + 1):length(conditions)) {
+    # Define the contrast
+    contrast <- c("Condition", conditions[i], conditions[j])
+    
+    # Get DESeq2 results for this contrast
+    res <- as.data.frame(results(dds_deseq, contrast = contrast))
+    
+    # Add gene names as a column
+    res$Gene <- rownames(res)
+    
+    # Rename columns with comparison-specific prefixes
+    comparison_name <- paste(conditions[i], "vs", conditions[j], sep = "_")
+    colnames(res) <- paste0(comparison_name, ".", colnames(res))
+    colnames(res)[ncol(res)] <- "Gene"  # Keep the "Gene" column unchanged
+    
+    # Merge into the wide_results dataframe
+    if (nrow(wide_results) == 0) {
+      wide_results <- res
+    } else {
+      wide_results <- full_join(wide_results, res, by = "Gene")
+    }
+  }
+}
+
+# Move the Gene column to the front
+wide_results <- wide_results %>% relocate(Gene)
+
+# View the final wide-format dataframe
+head(wide_results)
+
+# Merge wide_results with gene_information by Gene
+wide_results_with_product <- as.data.frame(wide_results %>%
+  left_join(gene_information, by = c("Gene" = "MMOL_RS")))
+
+# Save the results to a CSV file
+write.csv(wide_results_with_product, "gene_count_DESeq_summary.csv", row.names = FALSE)
+
+```
+
+## Check validity of interesting pair
+If I find a gene that is significantly different between counts in two conditions, how can I check that it is not signficant based on a statistical calculation (like in condition A, all counts are 0, and in Condition B, all counts are 1)? I will write something to manually display the gene counts for a given gene and given conditions and I can determine on a gene-by-gene basis. 
+```{r}
+get_gene_counts <- function(gene_name, condition1, condition2, condition3, gene_count_cds, metadata) {
+  
+  # Step 1: Validate inputs
+  if (!gene_name %in% rownames(gene_count_cds)) {
+    stop("Gene name not found in gene_count_cds")
+  }
+  
+  # Step 2: Extract gene count values for the input gene
+  gene_counts <- gene_count_cds[gene_name, ]  # Extract counts for the gene
+  
+  # Step 3: Link counts to metadata
+  counts_df <- data.frame(Position = colnames(gene_count_cds), Count = as.numeric(gene_counts))
+  metadata_with_counts <- merge(metadata, counts_df, by = "Position")
+  
+  # Step 4: Filter for the input conditions
+  filtered_data <- metadata_with_counts[
+    metadata_with_counts$Condition %in% c(condition1, condition2, condition3), 
+  ]
+  
+  # Step 5: Summarize results
+  result <- filtered_data[, c("Condition", "Replicate", "Count")]
+  result <- result[order(result$Condition, result$Replicate), ]  # Order by Condition and Replicate
+  
+  return(result)
+}
+
+
+# Usage
+condition1 <- "J_MeOH_La_P3"  # Replace with the first condition
+condition2 <- "J_MeOH_La_P5"
+condition3 <- "J_MA_La_P3"# Replace with the second condition
+gene_of_interest <- "MMOL_RS10940"  # Replace with the gene name you're interested in
+
+# Call the function
+result <- get_gene_counts(gene_of_interest, condition1, condition2, condition3, gene_count_cds, metadata)
+
+# View the result
+print(result)
+
+```
+
