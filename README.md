@@ -1,4 +1,5 @@
-## Getting environment and files ready
+## Step 1. Demultiplexing and tabulating BarSeq results
+### Getting environment and files ready
 1. Upload files to CHPC. We have two levels of multiplexing so that each well has its own combination of forward and reverse adapters that can be used for demultiplexing and keeping individual samples separate after sequencing.
     - The sequencing facility will demultiplex using the first set of adapters (in our case IT001-IT006). This corresponds the the A-F rows of our plates. Zipped sequence files will be in each of the IT001-IT006 folders; upload these folders.
     - Prepare an idxfile.txt for each of the IT00# directories. This file contains the barcodes that correspond to the second demultiplexing step and are unique for each column of our plate (1-12). For each IT00# folder, change the identifier so that IT001 = A, IT002 = B, etc. The barcodes will not change. Example here:
@@ -55,7 +56,7 @@
       chmod +x loop.sh
       ```
 
-## For each "IT00#" directory...
+### For each "IT00#" directory...
 0. Activate je_env if needed. 
     ```
     conda activate je_env
@@ -81,8 +82,14 @@
     ```
     cat jemultiplexer_out_stats.txt  
     ```
-6. Check the distribution of sequence lengths associated with each barcode detected. The majority of reads should be 20 bp long. 
+6. Check the distribution of sequence lengths associated with each barcode detected. The majority of reads should be 20 bp long.
+
+## Step 2. Data exploration
+Perform clustering and preliminary DESeq2 analyses to confirm that technical replicates are similar to one another and that any differences between conditions are more likely to be from biological, rather than technical, factors. Use R script [data_exploration.Rmd](https://github.com/delaney-beals/RB-TnSeq/blob/main/data_exploration.Rmd). 
+
+## Step 3. Gene fitness analysis
+Estimate the fitness of each gene from experiments. Use R script (FEBA.R)[https://github.com/delaney-beals/RB-TnSeq/blob/main/FEBA.R].
     ```
     cat D01P01/read_length_D01P01.txt
     ```
-7. Move to the next IT00# directory and repeat this process.
+8. Move to the next IT00# directory and repeat this process.
