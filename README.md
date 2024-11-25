@@ -83,13 +83,14 @@
     cat jemultiplexer_out_stats.txt  
     ```
 6. Check the distribution of sequence lengths associated with each barcode detected. The majority of reads should be 20 bp long.
+    ```
+    cat D01P01/read_length_D01P01.txt
+    ```
+8. Move to the next IT00# directory and repeat this process.
+
 
 ## Step 2. Data exploration
 Perform clustering and preliminary DESeq2 analyses to confirm that technical replicates are similar to one another and that any differences between conditions are more likely to be from biological, rather than technical, factors. Use R script [data_exploration.Rmd](https://github.com/delaney-beals/RB-TnSeq/blob/main/data_exploration.Rmd). 
 
 ## Step 3. Gene fitness analysis
 Estimate the fitness of each gene from experiments. Use R script [FEBA.R](https://github.com/delaney-beals/RB-TnSeq/blob/main/FEBA.R).
-    ```
-    cat D01P01/read_length_D01P01.txt
-    ```
-8. Move to the next IT00# directory and repeat this process.
